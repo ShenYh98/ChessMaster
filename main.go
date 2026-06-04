@@ -138,6 +138,13 @@ func main() {
 	}
 	defer restore()
 
+	// 注册 Windows 控制台事件处理器：点 X 关闭、注销、关机时也能
+	// 同步还原系统代理并关闭浏览器（避免 Windows 5 秒强杀造成代理残留）
+	setupConsoleCleanup(func() {
+		restore()
+		webui.CloseBrowser(browserCmd)
+	})
+
 	fmt.Println()
 	fmt.Println("━━━━━━━━━━━━━━━━━━━━ 配置步骤 ━━━━━━━━━━━━━━━━━━━━")
 	fmt.Printf("1. 设置 Windows 代理: 地址 127.0.0.1  端口 %s\n", (*proxyAddr)[1:])

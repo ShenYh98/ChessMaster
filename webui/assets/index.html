@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>ChessMaster 实时棋盘</title>
+<style>
+  :root {
+    --bg: #1f2933;
+    --panel: #2a3440;
+    --board-bg: #f3d9a2;
+    --line: #5a4a32;
+    --red: #c0392b;
+    --black: #2c3e50;
+    --hl-last: rgba(241, 196, 15, 0.55);
+    --hl-rec-from: rgba(46, 204, 113, 0.65);
+    --hl-rec-to: rgba(231, 76, 60, 0.75);
+    --txt: #ecf0f1;
+    --muted: #95a5a6;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; height: 100%; background: var(--bg); color: var(--txt);
+               font-family: "Microsoft YaHei", "PingFang SC", system-ui, sans-serif; }
+  .layout { display: grid; grid-template-columns: 1fr 360px; gap: 16px; padding: 16px; min-height: 100vh; }
+  .board-wrap { display: flex; flex-direction: column; align-items: center; justify-content: flex-start; }
+  .header { display: flex; justify-content: space-between; align-items: center; width: 100%; max-width: 720px;
+            margin-bottom: 8px; }
+  .title { font-size: 18px; font-weight: 600; }
+  .status { font-size: 13px; color: var(--muted); }
+  canvas { background: var(--board-bg); border-radius: 8px; box-shadow: 0 4px 16px rgba(0,0,0,.4);
+           display: block; }
+  .panel { background: var(--panel); border-radius: 8px; padding: 14px 16px; box-shadow: 0 2px 8px rgba(0,0,0,.3);
+           display: flex; flex-direction: column; gap: 14px; max-height: calc(100vh - 32px); }
+  .info-grid { display: grid; grid-template-columns: 80px 1fr; row-gap: 6px; column-gap: 12px; font-size: 13px; }
+  .info-grid .k { color: var(--muted); }
+  .info-grid .v { font-weight: 500; }
+  .recommend-box { background: rgba(231, 76, 60, .12); border: 1px solid rgba(231,76,60,.45);
+                   border-radius: 6px; padding: 10px 12px; }
+  .recommend-box.empty { background: rgba(149,165,166,.1); border-color: rgba(149,165,166,.3); }
+  .recommend-title { font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+  .recommend-body { font-size: 16px; font-weight: 600; color: #e74c3c; }
+  .recommend-body.empty { color: var(--muted); font-weight: 400; font-size: 13px; }
+  .history { flex: 1; overflow-y: auto; border-top: 1px solid rgba(255,255,255,.08); padding-top: 10px; }
+  .history h3 { margin: 0 0 8px; font-size: 13px; color: var(--muted); font-weight: 500; }
+  .history ol { padding: 0; margin: 0; list-style: none; }
+  .history li { padding: 4px 6px; font-size: 12px; border-radius: 3px; display: flex; gap: 8px; }
+  .history li:nth-child(odd) { background: rgba(255,255,255,.03); }
+  .history .idx { color: var(--muted); width: 28px; text-align: right; }
+  .history .red { color: #e74c3c; }
+  .history .black { color: #ecf0f1; }
+  .history .uci { color: var(--muted); margin-left: auto; font-family: monospace; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; }
+  .badge.red { background: var(--red); }
+  .badge.black { background: var(--black); }
+  .badge.muted { background: #555; }
+  .legend { display: flex; gap: 12px; font-size: 11px; color: var(--muted); flex-wrap: wrap; }
+  .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 4px; vertical-align: middle; }
+  .legend .last { background: #f1c40f; }
+  .legend .from { background: #2ecc71; }
+  .legend .to { background: #e74c3c; }
+</style>
+</head>
+<body>
+<div class="layout">
+  <div class="board-wrap">
+    <div class="header">
+      <div class="title">ChessMaster 实时棋盘</div>
+      <div class="status" id="status">未连接</div>
+    </div>
+    <canvas id="board" width="720" height="800"></canvas>
+    <div class="legend" style="margin-top:10px">
+      <span><i class="last"></i>上一手</span>
+      <span><i class="from"></i>推荐起点</span>
+      <span><i class="to"></i>推荐终点</span>
+    </div>
+  </div>
+  <div class="panel">
+    <div class="info-grid">
+      <div class="k">对局</div><div class="v" id="match">—</div>
+      <div class="k">我方</div><div class="v" id="myColor"><span class="badge muted">未识别</span></div>
+      <div class="k">轮到</div><div class="v" id="curSide">—</div>
+      <div class="k">引擎</div><div class="v" id="thinking">—</div>
+    </div>
+    <div class="recommend-box empty" id="recBox">
+      <div class="recommend-title">引擎推荐</div>
+      <div class="recommend-body empty" id="recBody">尚无推荐</div>
+    </div>
+    <div class="history">
+      <h3>行棋历史</h3>
+      <ol id="historyList"></ol>
+    </div>
+  </div>
+</div>
+<script>
+(function() {
+  const cv = document.getElementById('board');
+  const ctx = cv.getContext('2d');
+  // 9 列 10 行；外边距 + 格大小
+  const PAD = 40;
+  const CELL = 80;
+  const W = PAD * 2 + CELL * 8;       // 720
+  const H = PAD * 2 + CELL * 9;       // 800
+  cv.width = W; cv.height = H;
+
+  const PIECE_NAME = {
+    'K':'帅','A':'仕','B':'相','N':'马','R':'车','C':'炮','P':'兵',
+    'k':'将','a':'士','b':'象','n':'马','r':'车','c':'炮','p':'卒'
+  };
+
+  let state = null;
+
+  // 内部坐标 (x,y) → 画布像素中心
+  // 红方视角（myColor=1 或 -1）：红方在下，内部 y=0 在画布底部
+  // 黑方视角（myColor=0）：黑方在下，内部 y=9 在画布底部
+  function cellToPx(x, y, myColor) {
+    let dx, dy;
+    if (myColor === 0) {
+      // 黑方视角：黑方在下、黑方在眼前
+      // 内部 x=0(红方左) → 画布右 dx=8；内部 y=9(黑方底) → 画布底 dy=9
+      dx = 8 - x;
+      dy = y;
+    } else {
+      // 红方视角（默认）：红方在下、红方在眼前
+      // 内部 x=0(红方左) → 画布左 dx=0；内部 y=0(红方底) → 画布底 dy=9
+      dx = x;
+      dy = 9 - y;
+    }
+    return {
+      px: PAD + dx * CELL,
+      py: PAD + dy * CELL
+    };
+  }
+
+  function drawBoard(myColor) {
+    ctx.fillStyle = '#f3d9a2';
+    ctx.fillRect(0, 0, W, H);
+    ctx.strokeStyle = '#5a4a32';
+    ctx.lineWidth = 1.5;
+
+    // 横线 10 条
+    for (let i = 0; i < 10; i++) {
+      const y = PAD + i * CELL;
+      ctx.beginPath();
+      ctx.moveTo(PAD, y);
+      ctx.lineTo(PAD + 8 * CELL, y);
+      ctx.stroke();
+    }
+    // 竖线 9 条；中间河界处只画上下两段
+    for (let i = 0; i < 9; i++) {
+      const x = PAD + i * CELL;
+      ctx.beginPath();
+      if (i === 0 || i === 8) {
+        ctx.moveTo(x, PAD);
+        ctx.lineTo(x, PAD + 9 * CELL);
+      } else {
+        ctx.moveTo(x, PAD);
+        ctx.lineTo(x, PAD + 4 * CELL);
+        ctx.moveTo(x, PAD + 5 * CELL);
+        ctx.lineTo(x, PAD + 9 * CELL);
+      }
+      ctx.stroke();
+    }
+    // 九宫斜线（使用内部坐标，根据 myColor 自动翻转）
+    const drawCross = (ix1, iy1, ix2, iy2) => {
+      const a = cellToPx(ix1, iy1, myColor);
+      const b = cellToPx(ix2, iy2, myColor);
+      ctx.beginPath();
+      ctx.moveTo(a.px, a.py); ctx.lineTo(b.px, b.py);
+      ctx.moveTo(b.px, a.py); ctx.lineTo(a.px, b.py);
+      ctx.stroke();
+    };
+    drawCross(3, 0, 5, 2); // 红方九宫
+    drawCross(3, 7, 5, 9); // 黑方九宫
+
+    // 河界文字（画布中部不随视角变）
+    ctx.fillStyle = '#5a4a32';
+    ctx.font = '24px "Microsoft YaHei"';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('楚 河', PAD + 2 * CELL, PAD + 4.5 * CELL);
+    ctx.fillText('汉 界', PAD + 6 * CELL, PAD + 4.5 * CELL);
+  }
+
+  function drawHighlight(x, y, color, myColor) {
+    const {px, py} = cellToPx(x, y, myColor);
+    ctx.beginPath();
+    ctx.arc(px, py, CELL * 0.46, 0, Math.PI * 2);
+    ctx.fillStyle = color;
+    ctx.fill();
+  }
+
+  function drawArrow(x1, y1, x2, y2, color, myColor) {
+    const a = cellToPx(x1, y1, myColor);
+    const b = cellToPx(x2, y2, myColor);
+    const dx = b.px - a.px, dy = b.py - a.py;
+    const len = Math.hypot(dx, dy);
+    if (len < 1) return;
+    const ux = dx / len, uy = dy / len;
+    // 收一点距离避免压住棋子中心
+    const sx = a.px + ux * CELL * 0.35, sy = a.py + uy * CELL * 0.35;
+    const ex = b.px - ux * CELL * 0.35, ey = b.py - uy * CELL * 0.35;
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 5;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(sx, sy);
+    ctx.lineTo(ex, ey);
+    ctx.stroke();
+    // 箭头头
+    const head = 14;
+    const angle = Math.atan2(ey - sy, ex - sx);
+    ctx.beginPath();
+    ctx.moveTo(ex, ey);
+    ctx.lineTo(ex - head * Math.cos(angle - Math.PI / 6), ey - head * Math.sin(angle - Math.PI / 6));
+    ctx.lineTo(ex - head * Math.cos(angle + Math.PI / 6), ey - head * Math.sin(angle + Math.PI / 6));
+    ctx.closePath();
+    ctx.fillStyle = color;
+    ctx.fill();
+  }
+
+  function drawPiece(x, y, ch, myColor) {
+    const {px, py} = cellToPx(x, y, myColor);
+    const isRed = ch === ch.toUpperCase();
+    // 圆底
+    ctx.beginPath();
+    ctx.arc(px, py, CELL * 0.4, 0, Math.PI * 2);
+    ctx.fillStyle = '#fff7e0';
+    ctx.fill();
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = isRed ? '#c0392b' : '#2c3e50';
+    ctx.stroke();
+    // 文字
+    ctx.fillStyle = isRed ? '#c0392b' : '#2c3e50';
+    ctx.font = 'bold 38px "Microsoft YaHei", "STKaiti", sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(PIECE_NAME[ch] || ch, px, py + 2);
+  }
+
+  function render() {
+    const myColor = state ? state.myColor : -1;
+    drawBoard(myColor);
+    if (!state) return;
+
+    // 高亮：上一步起点（淡黄）
+    if (state.lastMove) {
+      drawHighlight(state.lastMove.fromX, state.lastMove.fromY, 'rgba(241, 196, 15, 0.45)', myColor);
+      drawHighlight(state.lastMove.toX, state.lastMove.toY, 'rgba(241, 196, 15, 0.45)', myColor);
+    }
+    // 推荐：绿色起点 → 红色终点 + 红色箭头
+    if (state.recommend) {
+      drawHighlight(state.recommend.fromX, state.recommend.fromY, 'rgba(46, 204, 113, 0.55)', myColor);
+      drawHighlight(state.recommend.toX, state.recommend.toY, 'rgba(231, 76, 60, 0.65)', myColor);
+    }
+
+    // 棋子
+    if (state.cells) {
+      for (let y = 0; y < 10; y++) {
+        for (let x = 0; x < 9; x++) {
+          const c = state.cells[y][x];
+          if (c) drawPiece(x, y, c, myColor);
+        }
+      }
+    }
+    // 推荐箭头叠在最上层
+    if (state.recommend) {
+      drawArrow(state.recommend.fromX, state.recommend.fromY,
+                state.recommend.toX, state.recommend.toY,
+                'rgba(231, 76, 60, 0.85)', myColor);
+    }
+  }
+
+  function applyState(s) {
+    state = s;
+    // 头部信息
+    if (s.active) {
+      document.getElementById('match').textContent =
+        (s.matchName || '对局') + ' (#' + s.matchID + ')';
+    } else {
+      document.getElementById('match').textContent = '未在对局中';
+    }
+    const myEl = document.getElementById('myColor');
+    if (s.myColor === 1) myEl.innerHTML = '<span class="badge red">红方</span>';
+    else if (s.myColor === 0) myEl.innerHTML = '<span class="badge black">黑方</span>';
+    else myEl.innerHTML = '<span class="badge muted">未识别</span>';
+
+    const sideEl = document.getElementById('curSide');
+    if (s.curSide === 1) sideEl.innerHTML = '<span class="badge red">红方走</span>';
+    else if (s.curSide === 0) sideEl.innerHTML = '<span class="badge black">黑方走</span>';
+    else sideEl.textContent = '—';
+
+    document.getElementById('thinking').textContent = s.thinking ? '思考中…' : '空闲';
+
+    const recBox = document.getElementById('recBox');
+    const recBody = document.getElementById('recBody');
+    if (s.recommend) {
+      recBox.classList.remove('empty');
+      recBody.classList.remove('empty');
+      recBody.textContent = s.recommend.piece + '  ' + s.recommend.uci;
+    } else {
+      recBox.classList.add('empty');
+      recBody.classList.add('empty');
+      recBody.textContent = s.thinking ? '正在计算…' : '无推荐';
+    }
+
+    // 历史
+    const hl = document.getElementById('historyList');
+    hl.innerHTML = '';
+    const list = (s.history || []).slice(-30).reverse();
+    for (const h of list) {
+      const li = document.createElement('li');
+      const cls = h.color === '红方' ? 'red' : 'black';
+      const cap = h.capture ? '吃' : '';
+      li.innerHTML =
+        '<span class="idx">' + h.index + '.</span>' +
+        '<span class="' + cls + '">' + h.color + ' ' + h.piece + cap + '</span>' +
+        '<span class="uci">' + h.uci + '</span>';
+      hl.appendChild(li);
+    }
+
+    render();
+  }
+
+  function connect() {
+    const status = document.getElementById('status');
+    const es = new EventSource('/events');
+    es.onopen = () => { status.textContent = '已连接 · 实时'; status.style.color = '#2ecc71'; };
+    es.onerror = () => { status.textContent = '连接断开 · 重连中'; status.style.color = '#e67e22'; };
+    es.onmessage = (ev) => {
+      try { applyState(JSON.parse(ev.data)); }
+      catch (e) { console.error('parse error', e); }
+    };
+  }
+
+  drawBoard(-1);
+  connect();
+})();
+</script>
+</body>
+</html>

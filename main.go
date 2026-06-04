@@ -6,12 +6,14 @@ import (
 	"chessmaster/logger"
 	"chessmaster/proxy"
 	"chessmaster/sysproxy"
+	"chessmaster/webui"
 	"context"
 	"flag"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"strings"
 	"sync"
@@ -32,6 +34,7 @@ func main() {
 	mySeat := flag.Int("myseat", -1, "我方席位（0=黑 1=红，-1=进入对局后自动识别）")
 	movetimeMs := flag.Int("movetime", 3000, "引擎思考时长（毫秒）")
 	threads := flag.Int("threads", 4, "引擎线程数")
+	webAddr := flag.String("web", ":8900", "Web 可视化监听地址（空字符串禁用）")
 	flag.Parse()
 
 	if *engineTest {
@@ -94,6 +97,27 @@ func main() {
 		}
 	}()
 
+	// 3.6 Web 可视化服务器（实时棋盘 + 推荐点位）
+	var webServer *webui.Server
+	var browserCmd *exec.Cmd
+	if advisor != nil && *webAddr != "" {
+		webServer = webui.New(advisor, *webAddr)
+		if err := webServer.Start(); err != nil {
+			log.Printf("⚠ Web 可视化启动失败: %v", err)
+			webServer = nil
+		} else {
+			advisor.SetWatcher(webServer.Broadcast)
+			host := *webAddr
+			if strings.HasPrefix(host, ":") {
+				host = "127.0.0.1" + host
+			}
+			url := "http://" + host
+			fmt.Printf("✓ Web 棋盘可视化: %s\n", url)
+			// 启动独立应用窗口（退出时一并关闭）
+			browserCmd = webui.LaunchBrowser(url)
+		}
+	}
+
 	// 4. 自动开启 Windows 系统代理，退出时还原
 	sysproxyAddr := buildSysProxyAddr(*proxyAddr)
 	origState, _ := sysproxy.Get()
@@ -127,9 +151,13 @@ func main() {
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 	fmt.Println("\n正在关闭...")
-	restore() // 提前还原系统代理，避免后续关闭超时出现窗口卡顿
+	restore()                      // 提前还原系统代理，避免后续关闭超时出现窗口卡顿
+	webui.CloseBrowser(browserCmd) // 关闭 Web 页面窗口
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
+	if webServer != nil {
+		_ = webServer.Shutdown(shutdownCtx)
+	}
 	_ = proxyServer.Shutdown(shutdownCtx)
 	fmt.Println("日志已保存")
 }

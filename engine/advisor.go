@@ -3,6 +3,7 @@ package engine
 import (
 	"log"
 	"sync"
+	"time"
 )
 
 // MoveInfo 一次行棋数据（来自服务器 ack 包）
@@ -15,6 +16,49 @@ type MoveInfo struct {
 	MoveType int
 }
 
+// HistoryEntry 一条棋步历史记录
+type HistoryEntry struct {
+	Index   int    `json:"index"`
+	Seat    int    `json:"seat"`
+	Color   string `json:"color"` // "红方" / "黑方"
+	Piece   string `json:"piece"` // 中文名
+	UCI     string `json:"uci"`
+	FromX   int    `json:"fromX"`
+	FromY   int    `json:"fromY"`
+	ToX     int    `json:"toX"`
+	ToY     int    `json:"toY"`
+	Capture bool   `json:"capture"`
+	Time    int64  `json:"time"`
+}
+
+// MoveMark 棋盘上需高亮的一步
+type MoveMark struct {
+	FromX int    `json:"fromX"`
+	FromY int    `json:"fromY"`
+	ToX   int    `json:"toX"`
+	ToY   int    `json:"toY"`
+	Piece string `json:"piece"`
+	UCI   string `json:"uci"`
+}
+
+// Snapshot 供前端渲染的整局快照
+type Snapshot struct {
+	Active    bool           `json:"active"`
+	MatchID   int64          `json:"matchID"`
+	MatchName string         `json:"matchName"`
+	Cells     [10][9]string  `json:"cells"`   // FEN 单字符（"R"/"r"/""等）
+	MyColor   int            `json:"myColor"` // 1=红 0=黑 -1=未识别
+	MySeat    int            `json:"mySeat"`
+	RedSeat   int            `json:"redSeat"`
+	CurSide   int            `json:"curSide"` // 1=红 0=黑
+	LastMove  *MoveMark      `json:"lastMove,omitempty"`
+	Recommend *MoveMark      `json:"recommend,omitempty"`
+	History   []HistoryEntry `json:"history"`
+	Thinking  bool           `json:"thinking"`
+	FEN       string         `json:"fen"`
+	Updated   int64          `json:"updated"`
+}
+
 // Advisor 持有引擎与棋盘，根据行棋数据自动推荐着法
 type Advisor struct {
 	mu         sync.Mutex
@@ -24,11 +68,17 @@ type Advisor struct {
 	movetimeMs int    // 引擎思考时长
 	board      *Board // 当前棋盘（按 ack 顺序累积）
 	curMatchID int64  // 当前对局 ID
+	matchName  string // 当前对局名称
 	thinking   bool   // 引擎正在思考时跳过新请求
 
 	// 上一次给出的推荐着法（UCI 格式），用于对比我方实际走法
 	lastBest      string
 	lastBestPiece byte // 推荐时起点棋子
+
+	// Web/可视化需要的开拓信息
+	history  []HistoryEntry
+	lastMove *MoveMark
+	watcher  func() // 状态变更后回调（在锁外异步调用）
 }
 
 // NewAdvisor 创建一个推荐器
@@ -90,23 +140,27 @@ func (a *Advisor) SeatColorName(seat int) string {
 // SetMySeatOrder 由 enterround_ack_msg 调用，告知我方席位编号
 func (a *Advisor) SetMySeatOrder(seatOrder int) {
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	if a.mySeat == seatOrder {
+		a.mu.Unlock()
 		return
 	}
 	a.mySeat = seatOrder
 	a.tryAnnounceColor()
+	a.mu.Unlock()
+	a.notify()
 }
 
 // SetRedSeat 由 chesssetcolor_ack_msg 调用，告知红方席位编号
 func (a *Advisor) SetRedSeat(redSeat int) {
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	if a.redSeat == redSeat {
+		a.mu.Unlock()
 		return
 	}
 	a.redSeat = redSeat
 	a.tryAnnounceColor()
+	a.mu.Unlock()
+	a.notify()
 }
 
 // tryAnnounceColor 当 mySeat 和 redSeat 都已知时，推断并打印颜色
@@ -124,23 +178,27 @@ func (a *Advisor) tryAnnounceColor() {
 // OnGameStart 对局开始：始终重置棋盘和颜色，避免 matchID 复用的对局间状态串扰
 func (a *Advisor) OnGameStart(matchID int64, matchName string) {
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	a.board = InitStandard()
 	a.curMatchID = matchID
+	a.matchName = matchName
 	a.lastBest = ""
 	a.lastBestPiece = 0
 	a.mySeat = -1
 	a.redSeat = -1
+	a.history = nil
+	a.lastMove = nil
+	a.mu.Unlock()
 	log.Println("==================================================")
 	log.Printf("[新局] %s [matchid=%d]", matchName, matchID)
 	log.Println("==================================================")
+	a.notify()
 }
 
 // OnGameOver 服务器宣告对局结束（绝杀 / 超时判负 / 等）
 func (a *Advisor) OnGameOver(winnerSeat int, text string) {
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	if a.curMatchID == 0 {
+		a.mu.Unlock()
 		return // 已经被处理过
 	}
 	winnerName := SeatName(winnerSeat)
@@ -158,13 +216,16 @@ func (a *Advisor) OnGameOver(winnerSeat int, text string) {
 	a.lastBest = ""
 	a.lastBestPiece = 0
 	a.curMatchID = 0
+	a.lastMove = nil
+	a.mu.Unlock()
+	a.notify()
 }
 
-// OnGameLeave 客户端主动离开/退出/认输（leave_req_msg / exitmatch_req_msg）
+// OnGameLeave 客户端主动离开/退出/认负（leave_req_msg / exitmatch_req_msg）
 func (a *Advisor) OnGameLeave(matchID int64, reason string) {
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	if a.curMatchID == 0 || a.curMatchID != matchID {
+		a.mu.Unlock()
 		return // 已结束 或 不匹配（避免在大厅菜单触发的离开误报）
 	}
 	log.Printf("[结束] matchid=%d  原因: %s（手动）", a.curMatchID, reason)
@@ -172,6 +233,9 @@ func (a *Advisor) OnGameLeave(matchID int64, reason string) {
 	a.lastBest = ""
 	a.lastBestPiece = 0
 	a.curMatchID = 0
+	a.lastMove = nil
+	a.mu.Unlock()
+	a.notify()
 }
 
 // OnMove 接收一条已确认（ack）的行棋数据，更新棋盘并按需触发引擎推荐
@@ -214,9 +278,29 @@ func (a *Advisor) OnMove(m MoveInfo) {
 	// 应用棋步
 	a.board.ApplyMove(m.X1, m.Y1, m.X2, m.Y2)
 
+	// 记录历史与高亮
+	a.lastMove = &MoveMark{
+		FromX: m.X1, FromY: m.Y1,
+		ToX: m.X2, ToY: m.Y2,
+		Piece: PieceName(piece),
+		UCI:   actualUCI,
+	}
+	a.history = append(a.history, HistoryEntry{
+		Index: len(a.history) + 1,
+		Seat:  m.Seat,
+		Color: a.seatColorNameLocked(m.Seat),
+		Piece: PieceName(piece),
+		UCI:   actualUCI,
+		FromX: m.X1, FromY: m.Y1,
+		ToX: m.X2, ToY: m.Y2,
+		Capture: m.MoveType == 1,
+		Time:    time.Now().UnixMilli(),
+	})
+
 	// mySeat 未识别时不推荐
 	if a.mySeat < 0 {
 		a.mu.Unlock()
+		a.notify()
 		return
 	}
 
@@ -224,6 +308,7 @@ func (a *Advisor) OnMove(m MoveInfo) {
 	myTurn := m.NextSeat == a.mySeat
 	if !myTurn {
 		a.mu.Unlock()
+		a.notify()
 		return
 	}
 
@@ -231,11 +316,13 @@ func (a *Advisor) OnMove(m MoveInfo) {
 	if a.thinking {
 		a.mu.Unlock()
 		log.Printf("[advisor] 上一次思考未完成，跳过本次推荐")
+		a.notify()
 		return
 	}
 	a.thinking = true
 	fen := a.board.ToFEN()
 	a.mu.Unlock()
+	a.notify()
 
 	// 异步调引擎，不阻塞 WebSocket 转发
 	go a.askEngine(fen)
@@ -246,6 +333,7 @@ func (a *Advisor) askEngine(fen string) {
 		a.mu.Lock()
 		a.thinking = false
 		a.mu.Unlock()
+		a.notify()
 	}()
 
 	best, err := a.engine.BestMove(fen, a.movetimeMs)
@@ -274,6 +362,107 @@ func (a *Advisor) askEngine(fen string) {
 	} else {
 		log.Printf("[推荐] %s %s (%d,%d) 吃 %s (%d,%d)",
 			PieceName(piece), best, dx1, dy1, PieceName(target), dx2, dy2)
+	}
+}
+
+// SetWatcher 注入一个状态变更回调（例如 webui broadcast）
+func (a *Advisor) SetWatcher(fn func()) {
+	a.mu.Lock()
+	a.watcher = fn
+	a.mu.Unlock()
+}
+
+// notify 在锁外异步调用 watcher，避免重入锁死锁
+func (a *Advisor) notify() {
+	a.mu.Lock()
+	w := a.watcher
+	a.mu.Unlock()
+	if w != nil {
+		go w()
+	}
+}
+
+// seatColorNameLocked 需持锁调用
+func (a *Advisor) seatColorNameLocked(seat int) string {
+	if a.redSeat >= 0 && seat >= 0 {
+		if seat == a.redSeat {
+			return "红方"
+		}
+		return "黑方"
+	}
+	if seat == 1 {
+		return "红方"
+	}
+	return "黑方"
+}
+
+// Snapshot 返回当前状态的完整快照
+func (a *Advisor) Snapshot() Snapshot {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	var cells [10][9]string
+	if a.board != nil {
+		for y := 0; y < 10; y++ {
+			for x := 0; x < 9; x++ {
+				c := a.board.Cells[y][x]
+				if c == 0 {
+					cells[y][x] = ""
+				} else {
+					cells[y][x] = string(c)
+				}
+			}
+		}
+	}
+
+	curSide := -1
+	fen := ""
+	if a.board != nil {
+		if a.board.SideRed {
+			curSide = 1
+		} else {
+			curSide = 0
+		}
+		fen = a.board.ToFEN()
+	}
+
+	var rec *MoveMark
+	if a.lastBest != "" && a.curMatchID != 0 {
+		x1, y1, x2, y2, ok := UCIToXY(a.lastBest)
+		if ok {
+			rec = &MoveMark{
+				FromX: x1, FromY: y1,
+				ToX: x2, ToY: y2,
+				Piece: PieceName(a.lastBestPiece),
+				UCI:   a.lastBest,
+			}
+		}
+	}
+
+	var lastMoveCopy *MoveMark
+	if a.lastMove != nil {
+		lm := *a.lastMove
+		lastMoveCopy = &lm
+	}
+
+	hist := make([]HistoryEntry, len(a.history))
+	copy(hist, a.history)
+
+	return Snapshot{
+		Active:    a.curMatchID != 0,
+		MatchID:   a.curMatchID,
+		MatchName: a.matchName,
+		Cells:     cells,
+		MyColor:   a.myColorLocked(),
+		MySeat:    a.mySeat,
+		RedSeat:   a.redSeat,
+		CurSide:   curSide,
+		LastMove:  lastMoveCopy,
+		Recommend: rec,
+		History:   hist,
+		Thinking:  a.thinking,
+		FEN:       fen,
+		Updated:   time.Now().UnixMilli(),
 	}
 }
 

@@ -576,7 +576,7 @@ func (p *Proxy) wsRelayWithLog(src io.Reader, dst io.Writer, wsURL, host, direct
 			if !strings.Contains(err.Error(), "EOF") &&
 				!strings.Contains(err.Error(), "use of closed") &&
 				!strings.Contains(err.Error(), "connection reset") {
-				log.Printf("[WS] %s read frame error: %v", direction, err)
+				p.logger.LogHTTPError("[WS] %s read frame error: %v", direction, err)
 			}
 			return
 		}
@@ -610,7 +610,7 @@ func (p *Proxy) wsRelayWithLog(src io.Reader, dst io.Writer, wsURL, host, direct
 		// 透传原始帧（保持掩码不变）
 		if _, err := dst.Write(frame.Raw); err != nil {
 			if !strings.Contains(err.Error(), "use of closed") {
-				log.Printf("[WS] %s write frame error: %v", direction, err)
+				p.logger.LogHTTPError("[WS] %s write frame error: %v", direction, err)
 			}
 			return
 		}

@@ -41,10 +41,13 @@ type Logger struct {
 	httpFile     *os.File
 	wsFile       *os.File
 	chessFile    *os.File
+	errFile      *os.File // HTTP/HTTPS/WS 错误日志（不打印到终端）
+	errLogger    *log.Logger
 	curDate      string // 当前日期
 	httpBytes    int64  // 已写字节数
 	wsBytes      int64
 	chessBytes   int64
+	errBytes     int64
 	maxSizeBytes int64 // 单文件最大字节（默认 20MB）
 }
 
@@ -94,9 +97,13 @@ func (l *Logger) openFiles() {
 	httpPath := filepath.Join(l.logDir, fmt.Sprintf("http_%s.jsonl", today))
 	wsPath := filepath.Join(l.logDir, fmt.Sprintf("ws_%s.jsonl", today))
 	chessPath := filepath.Join(l.logDir, fmt.Sprintf("chess_%s.jsonl", today))
+	errPath := filepath.Join(l.logDir, fmt.Sprintf("http_error_%s.log", today))
 
 	if l.chessFile != nil {
 		l.chessFile.Close()
+	}
+	if l.errFile != nil {
+		l.errFile.Close()
 	}
 
 	var err error
@@ -113,12 +120,19 @@ func (l *Logger) openFiles() {
 	if err != nil {
 		log.Printf("打开行棋日志文件失败: %v", err)
 	}
+	l.errFile, err = os.OpenFile(errPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0644)
+	if err != nil {
+		log.Printf("打开 HTTP 错误日志文件失败: %v", err)
+	} else {
+		l.errLogger = log.New(l.errFile, "", log.LstdFlags)
+	}
 	l.httpBytes = 0
 	l.wsBytes = 0
 	l.chessBytes = 0
+	l.errBytes = 0
 
-	log.Printf("日志已清空并重建: %s | %s | %s（上限 %dMB/文件）",
-		httpPath, wsPath, chessPath, l.maxSizeBytes/1024/1024)
+	log.Printf("日志已清空并重建: %s | %s | %s | %s（上限 %dMB/文件）",
+		httpPath, wsPath, chessPath, errPath, l.maxSizeBytes/1024/1024)
 }
 
 // Add 添加一条记录并写入对应日志文件
@@ -217,6 +231,30 @@ func (l *Logger) Close() {
 	if l.chessFile != nil {
 		l.chessFile.Close()
 	}
+	if l.errFile != nil {
+		l.errFile.Close()
+	}
+}
+
+// LogHTTPError 写入一条 HTTP/HTTPS/WS/CONNECT 相关错误到独立日志文件，
+// 不输出到终端，避免干扰行棋分析输出。
+func (l *Logger) LogHTTPError(format string, args ...interface{}) {
+	msg := fmt.Sprintf(format, args...)
+	line := fmt.Sprintf("%s %s\n", time.Now().Format("2006/01/02 15:04:05"), msg)
+	lineLen := int64(len(line))
+
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.errFile == nil {
+		return
+	}
+	if l.errBytes+lineLen > l.maxSizeBytes {
+		l.errFile.Truncate(0)
+		l.errFile.Seek(0, 0)
+		l.errBytes = 0
+	}
+	l.errFile.Write([]byte(line))
+	l.errBytes += lineLen
 }
 
 // ---- 辅助函数 ----

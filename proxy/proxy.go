@@ -10,7 +10,6 @@ import (
 	"crypto/tls"
 	"fmt"
 	"io"
-	"log"
 	"net"
 	"net/http"
 	"strings"
@@ -167,7 +166,7 @@ func (p *Proxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 	}
 	clientConn, bufrw, err := hijacker.Hijack()
 	if err != nil {
-		log.Printf("[CONNECT] hijack error: %v", err)
+		p.logger.LogHTTPError("[CONNECT] hijack error: %v", err)
 		return
 	}
 	_, _ = clientConn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n"))
@@ -175,7 +174,7 @@ func (p *Proxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 	// 为该域名动态签发证书
 	tlsCfg, err := p.ca.TLSConfig(hostname)
 	if err != nil {
-		log.Printf("[CONNECT] TLS config error for %s: %v", hostname, err)
+		p.logger.LogHTTPError("[CONNECT] TLS config error for %s: %v", hostname, err)
 		clientConn.Close()
 		return
 	}
@@ -194,7 +193,7 @@ func (p *Proxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 	tlsClientConn := tls.Server(rawConn, tlsCfg)
 	if err := tlsClientConn.SetDeadline(time.Now().Add(10 * time.Second)); err == nil {
 		if err := tlsClientConn.Handshake(); err != nil {
-			log.Printf("[CONNECT] TLS handshake error for %s: %v", hostname, err)
+			p.logger.LogHTTPError("[CONNECT] TLS handshake error for %s: %v", hostname, err)
 			tlsClientConn.Close()
 			return
 		}
@@ -228,7 +227,7 @@ func (p *Proxy) handleTLSConn(conn *tls.Conn, originalHost string) {
 				!strings.Contains(err.Error(), "connection reset") &&
 				!strings.Contains(err.Error(), "use of closed") &&
 				!strings.Contains(err.Error(), "timeout") {
-				log.Printf("[HTTPS] read request error from %s: %v", originalHost, err)
+				p.logger.LogHTTPError("[HTTPS] read request error from %s: %v", originalHost, err)
 			}
 			return
 		}
@@ -255,7 +254,7 @@ func (p *Proxy) handleTLSConn(conn *tls.Conn, originalHost string) {
 
 		resp, err := p.client.Do(req)
 		if err != nil {
-			log.Printf("[HTTPS] upstream error %s %s: %v", req.Method, req.URL.String(), err)
+			p.logger.LogHTTPError("[HTTPS] upstream error %s %s: %v", req.Method, req.URL.String(), err)
 			p.logger.Add(&logger.Entry{
 				Time: start, Method: req.Method, URL: req.URL.String(),
 				Host: originalHost, Protocol: "HTTPS",
@@ -304,7 +303,7 @@ func (p *Proxy) handleTLSConn(conn *tls.Conn, originalHost string) {
 		resp.ProtoMinor = 1
 
 		if err := resp.Write(conn); err != nil {
-			log.Printf("[HTTPS] write response error: %v", err)
+			p.logger.LogHTTPError("[HTTPS] write response error: %v", err)
 			return
 		}
 
@@ -335,7 +334,7 @@ func (p *Proxy) handleWebSocket(clientConn net.Conn, clientReader *bufio.Reader,
 		MinVersion:         tls.VersionTLS12,
 	})
 	if err != nil {
-		log.Printf("[WS] upstream dial error %s: %v", originalHost, err)
+		p.logger.LogHTTPError("[WS] upstream dial error %s: %v", originalHost, err)
 		errResp := "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n"
 		clientConn.Write([]byte(errResp))
 		p.logger.Add(&logger.Entry{
@@ -350,7 +349,7 @@ func (p *Proxy) handleWebSocket(clientConn net.Conn, clientReader *bufio.Reader,
 
 	// 转发升级请求到真实服务器
 	if err := req.Write(upstreamConn); err != nil {
-		log.Printf("[WS] write upgrade request error: %v", err)
+		p.logger.LogHTTPError("[WS] write upgrade request error: %v", err)
 		return
 	}
 
@@ -358,7 +357,7 @@ func (p *Proxy) handleWebSocket(clientConn net.Conn, clientReader *bufio.Reader,
 	upstreamReader := bufio.NewReader(upstreamConn)
 	resp, err := http.ReadResponse(upstreamReader, req)
 	if err != nil {
-		log.Printf("[WS] read upgrade response error: %v", err)
+		p.logger.LogHTTPError("[WS] read upgrade response error: %v", err)
 		return
 	}
 
@@ -376,7 +375,7 @@ func (p *Proxy) handleWebSocket(clientConn net.Conn, clientReader *bufio.Reader,
 
 	// 将握手响应写回客户端
 	if err := resp.Write(clientConn); err != nil {
-		log.Printf("[WS] write upgrade response to client error: %v", err)
+		p.logger.LogHTTPError("[WS] write upgrade response to client error: %v", err)
 		return
 	}
 	resp.Body.Close()

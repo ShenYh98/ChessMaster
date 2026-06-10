@@ -219,10 +219,11 @@ func (a *Advisor) OnGameOver(winnerSeat int, text string) {
 	log.Printf("[结束] matchid=%d  胜方: %s  结果: %s  原因: %s",
 		a.curMatchID, winnerName, result, text)
 	log.Println("==================================================")
-	a.lastBest = ""
-	a.lastBestPiece = 0
+	a.resetBoardLocked()
+	a.mySeat = -1
+	a.redSeat = -1
+	a.matchName = ""
 	a.curMatchID = 0
-	a.lastMove = nil
 	a.mu.Unlock()
 	a.notify()
 }
@@ -236,10 +237,11 @@ func (a *Advisor) OnGameLeave(matchID int64, reason string) {
 	}
 	log.Printf("[结束] matchid=%d  原因: %s（手动）", a.curMatchID, reason)
 	log.Println("==================================================")
-	a.lastBest = ""
-	a.lastBestPiece = 0
+	a.resetBoardLocked()
+	a.mySeat = -1
+	a.redSeat = -1
+	a.matchName = ""
 	a.curMatchID = 0
-	a.lastMove = nil
 	a.mu.Unlock()
 	a.notify()
 }

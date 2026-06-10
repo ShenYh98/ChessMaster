@@ -175,18 +175,24 @@ func (a *Advisor) tryAnnounceColor() {
 	log.Printf("[颜色] 我方席位=%d, 红方席位=%d => 我执%s", a.mySeat, a.redSeat, color)
 }
 
+// resetBoardLocked 重置当前对局的棋盘、历史、高亮、推荐状态。需持锁调用。
+// matchID/mySeat/redSeat 请调用者自行赋值（不同路径语义不同）。
+func (a *Advisor) resetBoardLocked() {
+	a.board = InitStandard()
+	a.history = nil
+	a.lastMove = nil
+	a.lastBest = ""
+	a.lastBestPiece = 0
+}
+
 // OnGameStart 对局开始：始终重置棋盘和颜色，避免 matchID 复用的对局间状态串扰
 func (a *Advisor) OnGameStart(matchID int64, matchName string) {
 	a.mu.Lock()
-	a.board = InitStandard()
+	a.resetBoardLocked()
 	a.curMatchID = matchID
 	a.matchName = matchName
-	a.lastBest = ""
-	a.lastBestPiece = 0
 	a.mySeat = -1
 	a.redSeat = -1
-	a.history = nil
-	a.lastMove = nil
 	a.mu.Unlock()
 	log.Println("==================================================")
 	log.Printf("[新局] %s [matchid=%d]", matchName, matchID)
@@ -242,13 +248,13 @@ func (a *Advisor) OnGameLeave(matchID int64, reason string) {
 func (a *Advisor) OnMove(m MoveInfo) {
 	a.mu.Lock()
 
-	// 兜底：如果 advisor 还不知道当前对局（可能进程启动晚了），自动开局
+	// 兜底：如果 advisor 还不知道当前对局（进程启动晚，或上局结束后未收到 entermatch_ack_msg）
+	// 必须连同 history/lastMove 一起重置，否则新局棋盘会残留上一局的历史/高亮
 	if m.MatchID != a.curMatchID {
-		a.board = InitStandard()
+		a.resetBoardLocked()
 		a.curMatchID = m.MatchID
-		a.lastBest = ""
-		a.lastBestPiece = 0
-		log.Printf("[advisor] 检测到对局 %d（兜底重置棋盘）", m.MatchID)
+		a.matchName = ""
+		log.Printf("[advisor] 检测到新对局 %d（兜底重置棋盘）", m.MatchID)
 	}
 
 	// 应用棋步前先取起点棋子（应用后会被清空）
